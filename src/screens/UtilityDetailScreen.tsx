@@ -2,9 +2,10 @@ import { useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { UsageBarChart } from '../components/UsageBarChart';
-import { useApp } from '../context/AppContext';
+import { DEFAULT_UTILITY_COLORS, useApp } from '../context/AppContext';
 import { colors, radius, spacing } from '../theme';
 import type { RootStackScreenProps } from '../navigation/types';
+import type { UtilityCategory } from '../data/mockData';
 
 type Tab = 'usage' | 'billing' | 'settings';
 
@@ -13,7 +14,7 @@ export function UtilityDetailScreen({
   route,
 }: RootStackScreenProps<'UtilityDetail'>) {
   const { utilityId } = route.params;
-  const { utilities, usageSeries, billingHistory } = useApp();
+  const { utilities, usageSeries, billingHistory, utilityColors, setUtilityColor } = useApp();
   const [tab, setTab] = useState<Tab>('usage');
 
   // Wireframe mapping:
@@ -99,6 +100,27 @@ export function UtilityDetailScreen({
             <Text style={[styles.panelBody, { marginTop: spacing.sm }]}>
               Disconnect and notification preferences will live here.
             </Text>
+
+            <View style={{ marginTop: spacing.lg }}>
+              <Text style={styles.panelTitle}>Chart color</Text>
+              <Text style={styles.panelBody}>Used to render this utility in the dashboard chart.</Text>
+
+              <View style={styles.paletteRow}>
+                {PALETTE.map((p) => {
+                  const isSelected = (utilityColors[utility.id] ?? DEFAULT_UTILITY_COLORS[utility.category]) === p.color;
+                  return (
+                    <Pressable
+                      key={p.category}
+                      onPress={() => setUtilityColor(utility.id, p.color)}
+                      style={[
+                        styles.paletteSwatch,
+                        { backgroundColor: p.color, borderColor: isSelected ? colors.primary : colors.border },
+                      ]}
+                    />
+                  );
+                })}
+              </View>
+            </View>
           </View>
         )}
       </ScrollView>
@@ -155,4 +177,19 @@ const styles = StyleSheet.create({
   empty: { color: colors.textMuted, fontSize: 14 },
   missing: { color: colors.text, padding: spacing.lg },
   link: { color: colors.accent, paddingHorizontal: spacing.lg },
+  paletteRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm, flexWrap: 'wrap' },
+  paletteSwatch: {
+    width: 28,
+    height: 28,
+    borderRadius: 9999,
+    borderWidth: 2,
+  },
 });
+
+const PALETTE: Array<{ category: UtilityCategory; color: string }> = [
+  { category: 'electric', color: DEFAULT_UTILITY_COLORS.electric },
+  { category: 'water', color: DEFAULT_UTILITY_COLORS.water },
+  { category: 'trash', color: DEFAULT_UTILITY_COLORS.trash },
+  { category: 'internet', color: DEFAULT_UTILITY_COLORS.internet },
+  { category: 'gas', color: DEFAULT_UTILITY_COLORS.gas },
+];
