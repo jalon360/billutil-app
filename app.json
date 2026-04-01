@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "billutil-app",
-    "slug": "billutil-app",
+    "name": "BillUtil",
+    "slug": "billutil",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",

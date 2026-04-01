@@ -1,18 +1,39 @@
-import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useMemo, useState } from 'react';
-import type { BillingRow, ConnectedUtility, UtilityCategory } from '../data/mockData';
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  Animated,
+} from 'react-native';
+import { useMemo, useState, useRef, useEffect } from 'react';
+import type {
+  BillingRow,
+  ConnectedUtility,
+  UtilityCategory,
+} from '../data/mockData';
 import { DEFAULT_UTILITY_COLORS } from '../context/AppContext';
 import { colors, radius, spacing } from '../theme';
 
-const CATEGORY_ORDER: UtilityCategory[] = ['electric', 'water', 'trash', 'internet', 'gas'];
+const CATEGORY_ORDER: UtilityCategory[] = [
+  'Electric',
+  'Water',
+  'Trash',
+  'Internet',
+  'Gas',
+  'Phone'
+];
+
+const CHART_HEIGHT = 160;
+
+type Granularity = 'Day' | 'Month' | 'Year';
 
 type TooltipState =
   | {
-      monthLabel: string;
-      modeLabel: string; // Estimated / Previous
-      segmentLabel: string; // utility name or "Total"
+      label: string;
+      segmentLabel: string;
       cost: number;
       color: string;
+      barIndex: number;
     }
   | null;
 
@@ -23,18 +44,20 @@ type Props = {
   utilityColors: Record<string, string>;
 };
 
-function monthKeyToLabel(monthKey: string) {
-  // monthKey format: YYYY-MM
-  const [y, m] = monthKey.split('-');
-  const monthIndex = Number(m) - 1;
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const safeMonth = monthNames[monthIndex] ?? 'Mon';
-  return `${safeMonth} ${y}`;
+function getGroupKey(dateISO: string, granularity: Granularity) {
+  if (granularity === 'Day') return dateISO;
+  if (granularity === 'Month') return dateISO.slice(0, 7);
+  return dateISO.slice(0, 4);
 }
 
-function monthKeyFromDate(dateISO: string) {
-  // "2026-02-28" -> "2026-02"
-  return dateISO.slice(0, 7);
+function formatLabel(key: string, granularity: Granularity) {
+  if (granularity === 'Day') return key.slice(5);
+  if (granularity === 'Month') {
+    const [y, m] = key.split('-');
+    const names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return `${names[Number(m) - 1]} ${y}`;
+  }
+  return key;
 }
 
 export function UtilityCostStackedBarChart({
@@ -44,133 +67,230 @@ export function UtilityCostStackedBarChart({
   utilityColors,
 }: Props) {
   const [tooltip, setTooltip] = useState<TooltipState>(null);
+  const [granularity, setGranularity] = useState<Granularity>('Month');
+
+  const animation = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    animation.setValue(0);
+    Animated.timing(animation, {
+      toValue: 1,
+      duration: 500,
+      useNativeDriver: false,
+    }).start();
+  }, [granularity]);
 
   const selectedUtilities = useMemo(
     () => utilities.filter((u) => selectedUtilityIds.includes(u.id)),
     [utilities, selectedUtilityIds]
   );
 
-  const months = useMemo(() => {
-    const keys = Array.from(new Set(billingHistory.map((b) => monthKeyFromDate(b.periodEnd))));
-    keys.sort(); // YYYY-MM lexicographic sort is chronological
-    const latest = keys[keys.length - 1];
-    const previous = keys.length > 1 ? keys[keys.length - 2] : undefined;
-    return previous ? [previous, latest] : latest ? [latest] : [];
-  }, [billingHistory]);
+  const timeKeys = useMemo(() => {
+    const keys = Array.from(
+      new Set(
+        billingHistory.map((b) =>
+          getGroupKey(b.periodEnd, granularity)
+        )
+      )
+    );
+
+    keys.sort();
+
+    return keys.slice(
+      -(granularity === 'Day' ? 7 : granularity === 'Month' ? 6 : 5)
+    );
+  }, [billingHistory, granularity]);
 
   const dataForChart = useMemo(() => {
-    const currentMonthKey = months[months.length - 1];
-
-    const items = months.map((monthKey) => {
-      const modeLabel = monthKey === currentMonthKey ? 'Estimated' : 'Previous';
-
+    const items = timeKeys.map((timeKey) => {
       const segments = selectedUtilities
         .slice()
         .sort(
           (a, b) =>
-            CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category)
+            CATEGORY_ORDER.indexOf(a.category) -
+            CATEGORY_ORDER.indexOf(b.category)
         )
         .map((u) => {
-          const color = utilityColors[u.id] ?? DEFAULT_UTILITY_COLORS[u.category];
-          const cost =
-            monthKey === currentMonthKey
-              ? u.estimatedBill
-              : billingHistory
-                  .filter((b) => b.provider === u.name && monthKeyFromDate(b.periodEnd) === monthKey)
-                  .reduce((sum, b) => sum + b.amount, 0);
+          const color =
+            utilityColors[u.id] ??
+            DEFAULT_UTILITY_COLORS[u.category];
+
+          const cost = billingHistory
+            .filter(
+              (b) =>
+                b.provider === u.name &&
+                getGroupKey(b.periodEnd, granularity) === timeKey
+            )
+            .reduce((sum, b) => sum + b.amount, 0);
 
           return { utility: u, color, cost };
         })
-        // Hide 0-cost segments to keep the stacked bar clean.
         .filter((s) => s.cost > 0);
 
-      const monthTotal = segments.reduce((sum, s) => sum + s.cost, 0);
-      return { monthKey, modeLabel, segments, monthTotal };
+      const total = segments.reduce((sum, s) => sum + s.cost, 0);
+
+      return { timeKey, segments, total };
     });
 
-    const maxTotal = Math.max(1, ...items.map((i) => i.monthTotal));
-
+    const maxTotal = Math.max(1, ...items.map((i) => i.total));
     return { items, maxTotal };
-  }, [billingHistory, months, selectedUtilities, utilityColors]);
+  }, [billingHistory, selectedUtilities, utilityColors, timeKeys, granularity]);
 
-  const canRender = selectedUtilities.length > 0 && dataForChart.items.length > 0;
+  const yTicks = useMemo(() => {
+    const steps = 4;
+    const max = dataForChart.maxTotal;
+
+    return Array.from({ length: steps + 1 }).map((_, i) => {
+      const value = (max / steps) * i;
+      return {
+        value,
+        label: `$${Math.round(value)}`,
+        percent: i / steps,
+      };
+    });
+  }, [dataForChart.maxTotal]);
+
+  const canRender =
+    selectedUtilities.length > 0 && dataForChart.items.length > 0;
 
   return (
     <View style={styles.wrap}>
-      <View style={styles.headerRow}>
-        <Text style={styles.title}>Total utility cost</Text>
-        <Text style={styles.sub}>Monthly (estimated + previous). Click/hover for details.</Text>
+      <Text style={styles.title}>Total utility cost</Text>
+
+      {/* ZOOM */}
+      <View style={styles.zoomRow}>
+        {(['Day', 'Month', 'Year'] as const).map((g) => (
+          <Pressable
+            key={g}
+            onPress={() => setGranularity(g)}
+            style={[
+              styles.zoomBtn,
+              granularity === g && styles.zoomBtnActive,
+            ]}
+          >
+            <Text
+              style={[
+                styles.zoomText,
+                granularity === g && styles.zoomTextActive,
+              ]}
+            >
+              {g.toUpperCase()}
+            </Text>
+          </Pressable>
+        ))}
       </View>
 
       {!canRender ? (
-        <View style={styles.empty}>
-          <Text style={styles.emptyText}>Select at least one utility to render the chart.</Text>
-        </View>
+        <Text style={styles.empty}>
+          Select utilities to display chart
+        </Text>
       ) : (
-        <>
+        <View style={styles.chartContainer}>
+          {/* Y AXIS */}
+          <View style={styles.yAxis}>
+            {yTicks.map((tick, i) => (
+              <Text
+                key={i}
+                style={[
+                  styles.yAxisLabel,
+                  { bottom: `${tick.percent * 100}%` },
+                ]}
+              >
+                {tick.label}
+              </Text>
+            ))}
+          </View>
+
+          {/* GRID */}
+          <View style={styles.grid}>
+            {yTicks.map((tick, i) => (
+              <View
+                key={i}
+                style={[
+                  styles.gridLine,
+                  { bottom: `${tick.percent * 100}%` },
+                ]}
+              />
+            ))}
+          </View>
+
+          {/* BARS */}
           <View style={styles.chartRow}>
-            {dataForChart.items.map((item) => {
-              const barKey = item.monthKey;
-              const barHeight = CHART_HEIGHT;
+            {dataForChart.items.map((item, index) => {
+              const dimmed =
+                tooltip && tooltip.barIndex !== index;
 
               return (
-                <View key={barKey} style={styles.barCol}>
+                <View key={item.timeKey} style={styles.barCol}>
+                  <Text style={styles.totalLabel}>
+                    ${item.total.toFixed(0)}
+                  </Text>
+
                   <Pressable
-                    onPress={() => {
+                    onPress={() =>
                       setTooltip({
-                        monthLabel: monthKeyToLabel(item.monthKey),
-                        modeLabel: item.modeLabel,
+                        label: formatLabel(
+                          item.timeKey,
+                          granularity
+                        ),
                         segmentLabel: 'Total',
-                        cost: item.monthTotal,
-                        color: colorsForTooltip(item.modeLabel),
-                      });
-                    }}
-                    {...(Platform.OS === 'web'
-                      ? ({
-                          onMouseEnter: () =>
-                            setTooltip({
-                              monthLabel: monthKeyToLabel(item.monthKey),
-                              modeLabel: item.modeLabel,
-                              segmentLabel: 'Total',
-                              cost: item.monthTotal,
-                              color: colorsForTooltip(item.modeLabel),
-                            }),
-                          onMouseLeave: () => setTooltip(null),
-                        } as any)
-                      : {})}
+                        cost: item.total,
+                        color: '#94a3b8',
+                        barIndex: index,
+                      })
+                    }
                   >
-                    <View style={styles.barTrack}>
+                    <View
+                      style={[
+                        styles.barTrack,
+                        dimmed && styles.dimmed,
+                      ]}
+                    >
                       <View style={styles.stacked}>
-                        {item.segments.map((seg) => {
-                          // Height encodes the Y axis (total cost), not just relative split.
-                          const h = (seg.cost / dataForChart.maxTotal) * barHeight;
+                        {item.segments.map((seg, i) => {
+                          const isTop =
+                            i === item.segments.length - 1;
+
+                          const height =
+                            animation.interpolate({
+                              inputRange: [0, 1],
+                              outputRange: [
+                                0,
+                                (seg.cost /
+                                  dataForChart.maxTotal) *
+                                  CHART_HEIGHT,
+                              ],
+                            });
+
                           return (
                             <Pressable
                               key={seg.utility.id}
-                              onPress={() => {
+                              onPress={() =>
                                 setTooltip({
-                                  monthLabel: monthKeyToLabel(item.monthKey),
-                                  modeLabel: item.modeLabel,
-                                  segmentLabel: seg.utility.name,
+                                  label: formatLabel(
+                                    item.timeKey,
+                                    granularity
+                                  ),
+                                  segmentLabel:
+                                    seg.utility.name,
                                   cost: seg.cost,
                                   color: seg.color,
-                                });
-                              }}
-                              {...(Platform.OS === 'web'
-                                ? ({
-                                    onMouseEnter: () =>
-                                      setTooltip({
-                                        monthLabel: monthKeyToLabel(item.monthKey),
-                                        modeLabel: item.modeLabel,
-                                        segmentLabel: seg.utility.name,
-                                        cost: seg.cost,
-                                        color: seg.color,
-                                      }),
-                                    onMouseLeave: () => setTooltip(null),
-                                  } as any)
-                                : {})}
+                                  barIndex: index,
+                                })
+                              }
                             >
-                              <View style={[styles.segment, { height: h, backgroundColor: seg.color }]} />
+                              <Animated.View
+                                style={[
+                                  styles.segment,
+                                  {
+                                    height,
+                                    backgroundColor:
+                                      seg.color,
+                                  },
+                                  isTop &&
+                                    styles.topSegment,
+                                ]}
+                              />
                             </Pressable>
                           );
                         })}
@@ -178,51 +298,65 @@ export function UtilityCostStackedBarChart({
                     </View>
                   </Pressable>
 
-                  <Text style={styles.monthLabel}>{monthKeyToLabel(item.monthKey)}</Text>
-                  <Text style={styles.modeLabel}>{item.modeLabel}</Text>
+                  <Text style={styles.monthLabel}>
+                    {formatLabel(
+                      item.timeKey,
+                      granularity
+                    )}
+                  </Text>
                 </View>
               );
             })}
           </View>
 
+          {/* X AXIS */}
+          <View style={styles.xAxisLine} />
+
+          {/* TOOLTIP */}
           {tooltip && (
-            <View style={[styles.tooltip, { borderColor: tooltip.color }]}>
-              <Text style={styles.tooltipTitle}>{tooltip.segmentLabel}</Text>
-              <Text style={styles.tooltipLine}>
-                {tooltip.monthLabel} • {tooltip.modeLabel}
+            <View
+              style={[
+                styles.tooltip,
+                { borderLeftColor: tooltip.color },
+              ]}
+            >
+              <Text style={styles.tooltipTitle}>
+                {tooltip.segmentLabel}
               </Text>
-              <Text style={styles.tooltipCost}>${tooltip.cost.toFixed(2)}</Text>
+              <Text style={styles.tooltipLine}>
+                {tooltip.label}
+              </Text>
+              <Text style={styles.tooltipCost}>
+                ${tooltip.cost.toFixed(2)}
+              </Text>
             </View>
           )}
-        </>
+        </View>
       )}
 
+      {/* LEGEND */}
       <View style={styles.legend}>
-        <View style={styles.legendRow}>
-          {selectedUtilities
-            .slice()
-            .sort((a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category))
-            .map((u) => {
-              const color = utilityColors[u.id] ?? DEFAULT_UTILITY_COLORS[u.category];
-              return (
-                <View key={u.id} style={styles.legendItem}>
-                  <View style={[styles.legendDot, { backgroundColor: color }]} />
-                  <Text style={styles.legendText} numberOfLines={1}>
-                    {u.name}
-                  </Text>
-                </View>
-              );
-            })}
-        </View>
+        {selectedUtilities.map((u) => {
+          const color =
+            utilityColors[u.id] ??
+            DEFAULT_UTILITY_COLORS[u.category];
+          return (
+            <View key={u.id} style={styles.legendItem}>
+              <View
+                style={[
+                  styles.legendDot,
+                  { backgroundColor: color },
+                ]}
+              />
+              <Text style={styles.legendText}>
+                {u.name}
+              </Text>
+            </View>
+          );
+        })}
       </View>
     </View>
   );
-}
-
-const CHART_HEIGHT = 160;
-
-function colorsForTooltip(_modeLabel: string) {
-  return '#94a3b8';
 }
 
 const styles = StyleSheet.create({
@@ -232,69 +366,196 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
-    marginBottom: spacing.lg,
   },
-  headerRow: { marginBottom: 12 },
-  title: { fontSize: 18, fontWeight: '800', color: colors.text, marginBottom: 4 },
-  sub: { fontSize: 12, color: colors.textMuted },
 
-  empty: {
-    padding: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
+  title: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: colors.text,
+    marginBottom: 6,
   },
-  emptyText: { color: colors.textMuted },
+
+  zoomRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 10,
+  },
+
+  zoomBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: colors.surfaceElevated,
+  },
+
+  zoomBtnActive: {
+    backgroundColor: colors.primary,
+  },
+
+  zoomText: {
+    fontSize: 11,
+    color: colors.textMuted,
+    fontWeight: '600',
+  },
+
+  zoomTextActive: {
+    color: '#fff',
+  },
+
+  chartContainer: {
+    position: 'relative',
+    paddingTop: 10,
+  },
+
+  yAxis: {
+    position: 'absolute',
+    left: 0,
+    top: 10,
+    bottom: 30,
+    width: 36,
+  },
+
+  yAxisLabel: {
+    position: 'absolute',
+    fontSize: 10,
+    color: colors.textMuted,
+  },
+
+  grid: {
+    position: 'absolute',
+    left: 36,
+    right: 0,
+    top: 10,
+    bottom: 30,
+  },
+
+  gridLine: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
 
   chartRow: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
     justifyContent: 'space-between',
-    gap: 14,
+    alignItems: 'flex-end',
+    gap: 8,
+    marginLeft: 36,
   },
-  barCol: { flex: 1, alignItems: 'center' },
+
+  barCol: {
+    flex: 1,
+    alignItems: 'center',
+  },
+
+  totalLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.text,
+    marginBottom: 6,
+  },
 
   barTrack: {
-    width: 34,
-    height: CHART_HEIGHT,
-    borderRadius: 10,
-    backgroundColor: colors.surfaceElevated,
+    width: 22,
+    height: 160,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.03)',
     overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: colors.border,
     justifyContent: 'flex-end',
   },
+
   stacked: {
     flex: 1,
     flexDirection: 'column-reverse',
-    justifyContent: 'flex-start',
+  },
+
+  segment: {
     width: '100%',
   },
-  segment: { width: '100%' },
+
+  topSegment: {
+    borderTopLeftRadius: 6,
+    borderTopRightRadius: 6,
+  },
+
+  dimmed: {
+    opacity: 0.3,
+  },
 
   monthLabel: {
     marginTop: 8,
     fontSize: 11,
-    color: colors.textMuted,
-    textAlign: 'center',
+    fontWeight: '600',
+    color: colors.text,
   },
-  modeLabel: { fontSize: 10, marginTop: 4, color: colors.textMuted },
+
+  xAxisLine: {
+    position: 'absolute',
+    left: 36,
+    right: 0,
+    bottom: 28,
+    height: 1,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
 
   tooltip: {
-    marginTop: 12,
-    borderWidth: 1,
-    borderRadius: 12,
-    backgroundColor: colors.background,
-    padding: spacing.md,
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    backgroundColor: colors.surface,
+    borderRadius: 10,
+    padding: 10,
+    borderLeftWidth: 4,
+    borderColor: colors.border,
+    elevation: 4,
   },
-  tooltipTitle: { color: colors.text, fontWeight: '800' },
-  tooltipLine: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
-  tooltipCost: { color: colors.text, fontWeight: '900', fontSize: 16, marginTop: 6 },
 
-  legend: { marginTop: 14 },
-  legendRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
-  legendDot: { width: 10, height: 10, borderRadius: 6 },
-  legendText: { color: colors.textMuted, fontSize: 11, fontWeight: '600' },
+  tooltipTitle: {
+    fontWeight: '800',
+    color: colors.text,
+  },
+
+  tooltipLine: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+
+  tooltipCost: {
+    fontSize: 16,
+    fontWeight: '900',
+    marginTop: 6,
+    color: colors.text,
+  },
+
+  legend: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 12,
+  },
+
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+
+  legendDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 6,
+  },
+
+  legendText: {
+    fontSize: 11,
+    color: colors.textMuted,
+  },
+
+  empty: {
+    color: colors.textMuted,
+    marginTop: 10,
+  },
 });
-
